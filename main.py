@@ -107,8 +107,8 @@ class TradingBot:
             total = await self._portfolio.get_total_value()
             self._risk.set_initial_balance(total)
         else:
-            self._risk.set_initial_balance(500_000)  # Paper: 50만원
-            logger.info("[PAPER] 초기 잔고: 500,000 KRW")
+            self._risk.set_initial_balance(self._config.paper_balance)
+            logger.info(f"[PAPER] 초기 잔고: {self._config.paper_balance:,.0f} KRW")
 
         # 코인 초기 선별
         await self._select_coins()
@@ -273,7 +273,7 @@ class TradingBot:
             )
 
             # 포지션 사이징
-            available = await self._portfolio.get_available_krw() if not self._paper_mode else 500_000
+            available = await self._portfolio.get_available_krw() if not self._paper_mode else self._config.paper_balance
             order_per_level = self._risk.calculate_position_size(
                 available, current_price, signal.confidence, self._config.grid_levels
             )

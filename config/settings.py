@@ -34,9 +34,9 @@ class TradingConfig:
     volume_ma_period: int = 20
 
     # ── 코인 선별 ───────────────────────────────────────
-    max_coins: int = 3
+    max_coins: int = 1
     fixed_coins: list[str] = field(default_factory=lambda: [
-        "KRW-BTC", "KRW-ETH", "KRW-XRP"
+        "KRW-BTC"
     ])
     min_volume_krw: float = 1_000_000_000  # 24h 거래대금 10억 이상
     max_daily_change: float = 0.10          # 일 변동률 10% 초과 제외
@@ -49,6 +49,7 @@ class TradingConfig:
     max_position_age_hours: int = 48
 
     # ── 실행 설정 ───────────────────────────────────────
+    paper_balance: float = 100_000     # Paper 모드 초기 잔고
     candle_unit: int = 1               # 1분봉
     check_interval_sec: int = 60       # 1분마다 체크
     min_order_krw: float = 5_000       # Upbit 최소 주문금액
