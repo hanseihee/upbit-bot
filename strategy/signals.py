@@ -1,4 +1,4 @@
-"""매매 신호 생성 엔진. Mean Reversion 필터 + 신뢰도 계산."""
+"""매매 신호 생성 엔진. 시장 체제 필터 + Mean Reversion + Momentum."""
 
 from __future__ import annotations
 
@@ -18,6 +18,12 @@ class SignalType(str, Enum):
     MOMENTUM_BUY = "momentum_buy"
 
 
+class MarketRegime(str, Enum):
+    RANGE = "range"           # 횡보 → Grid 적합
+    TRENDING = "trending"     # 추세 → Momentum만
+    TRANSITIONAL = "transitional"  # 과도기 → 대기
+
+
 @dataclass
 class Signal:
     type: SignalType
@@ -26,6 +32,7 @@ class Signal:
     market: str = ""
     price: float = 0.0
     strategy: str = "mean_reversion"
+    regime: MarketRegime = MarketRegime.TRANSITIONAL
 
     @property
     def is_actionable(self) -> bool:
@@ -33,17 +40,21 @@ class Signal:
 
 
 class SignalEngine:
-    """매매 신호 생성기. RSI + BB + Volume + MACD 기반."""
+    """매매 신호 생성기. 시장 체제 필터 + RSI + BB + Volume + MACD 기반."""
 
     def __init__(
         self,
-        rsi_oversold: float = 30.0,
+        rsi_oversold: float = 35.0,
         rsi_overbought: float = 70.0,
         bb_period: int = 20,
         bb_std: float = 2.0,
         rsi_period: int = 14,
         atr_period: int = 14,
         volume_ma_period: int = 20,
+        adx_period: int = 14,
+        regime_bb_width_low: float = 0.04,
+        regime_bb_width_high: float = 0.08,
+        regime_adx_threshold: float = 25.0,
     ) -> None:
         self._rsi_oversold = rsi_oversold
         self._rsi_overbought = rsi_overbought
@@ -52,20 +63,46 @@ class SignalEngine:
         self._rsi_period = rsi_period
         self._atr_period = atr_period
         self._vol_period = volume_ma_period
+        self._adx_period = adx_period
+        self._regime_bb_low = regime_bb_width_low
+        self._regime_bb_high = regime_bb_width_high
+        self._regime_adx = regime_adx_threshold
+
+    def _analyze(self, df: pd.DataFrame) -> pd.DataFrame:
+        """지표 일괄 계산."""
+        return TechnicalIndicators.calculate_all(
+            df,
+            rsi_period=self._rsi_period,
+            bb_period=self._bb_period,
+            bb_std=self._bb_std,
+            atr_period=self._atr_period,
+            vol_period=self._vol_period,
+            adx_period=self._adx_period,
+        )
+
+    def detect_regime(self, analyzed: pd.DataFrame) -> MarketRegime:
+        """시장 체제 판별: ADX + BB Bandwidth.
+
+        RANGE: BB Width < 4% AND ADX < 25 → Grid 적합
+        TRENDING: ADX > 25 OR BB Width > 8% → Momentum만
+        TRANSITIONAL: 그 외 → 대기 또는 보수적 운용
+        """
+        latest = analyzed.iloc[-1]
+        adx_val = latest.get("adx", 0)
+        bb_bw = latest.get("bb_bandwidth", 0)
+
+        if pd.isna(adx_val) or pd.isna(bb_bw):
+            return MarketRegime.TRANSITIONAL
+
+        if adx_val > self._regime_adx or bb_bw > self._regime_bb_high:
+            return MarketRegime.TRENDING
+        elif bb_bw < self._regime_bb_low and adx_val < self._regime_adx:
+            return MarketRegime.RANGE
+        else:
+            return MarketRegime.TRANSITIONAL
 
     def generate_signal(self, df: pd.DataFrame, market: str = "") -> Signal:
-        """캔들 데이터로부터 매매 신호 생성.
-
-        진입 조건 (모두 충족 시 BUY):
-        - RSI(14) < 30 (과매도)
-        - 가격 <= BB 하단밴드
-        - 현재 거래량 > 20일 평균 거래량
-        - MACD 히스토그램 상승 전환 (보강)
-
-        청산 조건 (하나라도 충족 시 SELL):
-        - RSI(14) > 70 (과매수)
-        - 가격 >= BB 상단밴드
-        """
+        """캔들 데이터로부터 매매 신호 생성."""
         if len(df) < max(self._bb_period, 26) + 5:
             return Signal(
                 type=SignalType.HOLD,
@@ -74,25 +111,32 @@ class SignalEngine:
                 market=market,
             )
 
-        # 지표 계산
-        analyzed = TechnicalIndicators.calculate_all(
-            df,
-            rsi_period=self._rsi_period,
-            bb_period=self._bb_period,
-            bb_std=self._bb_std,
-            atr_period=self._atr_period,
-            vol_period=self._vol_period,
-        )
+        analyzed = self._analyze(df)
+        return self._evaluate_signal(analyzed, market)
 
+    def _evaluate_signal(self, analyzed: pd.DataFrame, market: str = "") -> Signal:
+        """Pre-analyzed 데이터에서 매매 신호 평가 (백테스트 최적화용).
+
+        시장 체제 필터:
+        - RANGE 또는 TRANSITIONAL에서만 Mean Reversion BUY 허용
+        - TRENDING에서는 Grid 진입 차단
+
+        진입 조건 (가중 스코어링):
+        - RSI(14) < 35 (과매도)          [0.30]
+        - 가격 <= BB 하단밴드              [0.30]
+        - 현재 거래량 > 20일 평균          [0.20]
+        - MACD 히스토그램 상승 전환 (보강)  [0.20]
+        """
         latest = analyzed.iloc[-1]
         prev = analyzed.iloc[-2]
         price = latest["close"]
+        regime = self.detect_regime(analyzed)
 
         # ── 매수 신호 평가 ──
         buy_reasons: list[str] = []
         buy_score = 0.0
 
-        # RSI 과매도 (필수)
+        # RSI 과매도
         rsi_val = latest["rsi"]
         if rsi_val < self._rsi_oversold:
             buy_reasons.append(f"RSI 과매도: {rsi_val:.1f}")
@@ -101,7 +145,7 @@ class SignalEngine:
             buy_reasons.append(f"RSI 과매도 근접: {rsi_val:.1f}")
             buy_score += 0.10
 
-        # BB 하단 이탈 (필수)
+        # BB 하단 이탈
         bb_lower = latest["bb_lower"]
         if price <= bb_lower:
             buy_reasons.append(f"BB 하단 이탈: {price:,.0f} <= {bb_lower:,.0f}")
@@ -124,6 +168,11 @@ class SignalEngine:
             if macd_hist > macd_hist_prev:
                 buy_reasons.append("MACD 히스토그램 상승 전환")
                 buy_score += 0.20
+
+        # ── 시장 체제 필터 적용 ──
+        if regime == MarketRegime.TRENDING:
+            buy_score *= 0.3  # 추세장에서 Mean Reversion 크게 감점
+            buy_reasons.append(f"추세장 감점 (ADX>{self._regime_adx:.0f})")
 
         # ── 매도 신호 평가 ──
         sell_reasons: list[str] = []
@@ -151,6 +200,7 @@ class SignalEngine:
                 reasons=buy_reasons,
                 market=market,
                 price=price,
+                regime=regime,
             )
         elif sell_score > buy_score and sell_score >= 0.3:
             return Signal(
@@ -159,6 +209,7 @@ class SignalEngine:
                 reasons=sell_reasons,
                 market=market,
                 price=price,
+                regime=regime,
             )
         else:
             return Signal(
@@ -167,10 +218,15 @@ class SignalEngine:
                 reasons=["신호 강도 부족"],
                 market=market,
                 price=price,
+                regime=regime,
             )
 
     def generate_momentum_signal(self, df: pd.DataFrame, market: str = "") -> Signal:
         """모멘텀/브레이크아웃 매수 신호 생성.
+
+        시장 체제 필터:
+        - TRENDING 또는 TRANSITIONAL에서만 허용
+        - RANGE에서는 Momentum 차단
 
         진입 조건 (가중 스코어링):
         1. RSI > 55 & 상승 중        [0.20]
@@ -188,18 +244,11 @@ class SignalEngine:
                 strategy="momentum",
             )
 
-        analyzed = TechnicalIndicators.calculate_all(
-            df,
-            rsi_period=self._rsi_period,
-            bb_period=self._bb_period,
-            bb_std=self._bb_std,
-            atr_period=self._atr_period,
-            vol_period=self._vol_period,
-        )
-
+        analyzed = self._analyze(df)
         latest = analyzed.iloc[-1]
         prev = analyzed.iloc[-2]
         price = latest["close"]
+        regime = self.detect_regime(analyzed)
 
         reasons: list[str] = []
         score = 0.0
@@ -257,6 +306,11 @@ class SignalEngine:
                 reasons.append(f"ATR 확대: {atr_change:.1%}")
                 score += 0.10
 
+        # 시장 체제 필터: 횡보장에서 Momentum 감점
+        if regime == MarketRegime.RANGE:
+            score *= 0.3
+            reasons.append(f"횡보장 감점 (ADX<{self._regime_adx:.0f})")
+
         # 과매수 페널티
         if pd.notna(rsi_val) and rsi_val > self._rsi_overbought:
             score *= 0.5
@@ -270,6 +324,7 @@ class SignalEngine:
                 market=market,
                 price=price,
                 strategy="momentum",
+                regime=regime,
             )
 
         return Signal(
@@ -279,7 +334,59 @@ class SignalEngine:
             market=market,
             price=price,
             strategy="momentum",
+            regime=regime,
         )
+
+    def generate_recycle_signal(self, df: pd.DataFrame, rsi_threshold: float = 50.0, market: str = "") -> Signal:
+        """그리드 완료 후 재진입 신호 (완화된 조건).
+
+        조건:
+        - RSI < rsi_threshold (50)
+        - 시장 체제: RANGE 또는 TRANSITIONAL
+        - BB 하단 근처 (±1%)
+        """
+        if len(df) < max(self._bb_period, 26) + 5:
+            return Signal(type=SignalType.HOLD, confidence=0.0, reasons=["데이터 부족"], market=market)
+
+        analyzed = self._analyze(df)
+        latest = analyzed.iloc[-1]
+        price = latest["close"]
+        regime = self.detect_regime(analyzed)
+
+        if regime == MarketRegime.TRENDING:
+            return Signal(type=SignalType.HOLD, confidence=0.0, reasons=["추세장 재진입 차단"], market=market, regime=regime)
+
+        reasons: list[str] = []
+        score = 0.0
+
+        rsi_val = latest["rsi"]
+        if rsi_val < rsi_threshold:
+            reasons.append(f"RSI 재진입 조건 충족: {rsi_val:.1f}")
+            score += 0.40
+
+        bb_lower = latest["bb_lower"]
+        if price <= bb_lower * 1.01:
+            reasons.append(f"BB 하단 근처: {price:,.0f}")
+            score += 0.40
+
+        vol = latest["volume"]
+        vol_ma = latest["volume_ma"]
+        if pd.notna(vol_ma) and vol_ma > 0 and vol > vol_ma * 0.8:
+            reasons.append(f"거래량 적정: {vol / vol_ma:.1f}x")
+            score += 0.20
+
+        if score >= 0.6:
+            return Signal(
+                type=SignalType.BUY,
+                confidence=min(score, 1.0),
+                reasons=reasons,
+                market=market,
+                price=price,
+                strategy="grid_recycle",
+                regime=regime,
+            )
+
+        return Signal(type=SignalType.HOLD, confidence=0.0, reasons=["재진입 조건 미충족"], market=market, regime=regime)
 
     def calculate_confidence(self, df: pd.DataFrame) -> float:
         """현재 시장 상태의 전반적 신뢰도 평가."""

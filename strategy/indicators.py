@@ -81,6 +81,53 @@ class TechnicalIndicators:
         return macd_line, signal_line, histogram
 
     @staticmethod
+    def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """ADX (Average Directional Index) 계산.
+
+        추세 강도 측정: 0~100. >25이면 추세, <25이면 횡보.
+        """
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+
+        # +DM, -DM
+        up_move = high.diff()
+        down_move = -low.diff()
+
+        plus_dm = pd.Series(
+            np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
+            index=df.index,
+        )
+        minus_dm = pd.Series(
+            np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+            index=df.index,
+        )
+
+        # True Range
+        close_prev = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - close_prev).abs()
+        tr3 = (low - close_prev).abs()
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        # Smoothed averages
+        atr_smooth = true_range.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr_smooth.replace(0, np.nan)
+        minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr_smooth.replace(0, np.nan)
+
+        # DX → ADX
+        di_sum = plus_di + minus_di
+        dx = 100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)
+        adx_val = dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+        return adx_val.fillna(0)
+
+    @staticmethod
+    def bb_bandwidth(bb_upper: pd.Series, bb_lower: pd.Series, bb_middle: pd.Series) -> pd.Series:
+        """볼린저 밴드 Bandwidth (상단-하단)/중간. 변동성 수축/확장 판별."""
+        return (bb_upper - bb_lower) / bb_middle.replace(0, np.nan)
+
+    @staticmethod
     def volume_ma(df: pd.DataFrame, period: int = 20) -> pd.Series:
         """거래량 이동평균."""
         return df["volume"].rolling(window=period).mean()
@@ -93,6 +140,7 @@ class TechnicalIndicators:
         bb_std: float = 2.0,
         atr_period: int = 14,
         vol_period: int = 20,
+        adx_period: int = 14,
     ) -> pd.DataFrame:
         """모든 지표를 한 번에 계산하여 DataFrame에 추가."""
         result = df.copy()
@@ -116,5 +164,11 @@ class TechnicalIndicators:
         # 볼린저 밴드 %b (0~1, 하단=0, 상단=1)
         band_width = bb_upper - bb_lower
         result["bb_pct_b"] = (df["close"] - bb_lower) / band_width.replace(0, np.nan)
+
+        # ADX (추세 강도)
+        result["adx"] = TechnicalIndicators.adx(df, adx_period)
+
+        # BB Bandwidth (변동성 수축/확장)
+        result["bb_bandwidth"] = TechnicalIndicators.bb_bandwidth(bb_upper, bb_lower, bb_middle)
 
         return result

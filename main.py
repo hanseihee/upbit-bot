@@ -17,6 +17,7 @@ from pathlib import Path
 # 프로젝트 루트를 path에 추가
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pandas as pd
 from loguru import logger
 
 from config.settings import TradingConfig
@@ -27,7 +28,7 @@ from strategy.coin_selector import CoinSelector
 from strategy.grid import AdaptiveGrid, Grid, GridStatus, GridSide
 from strategy.indicators import TechnicalIndicators
 from strategy.momentum import MomentumPosition, MomentumStatus
-from strategy.signals import SignalEngine, SignalType
+from strategy.signals import SignalEngine, SignalType, MarketRegime
 from trading.order_manager import OrderManager
 from trading.portfolio import Portfolio
 from trading.risk_manager import RiskManager
@@ -74,6 +75,10 @@ class TradingBot:
             rsi_period=config.rsi_period,
             atr_period=config.atr_period,
             volume_ma_period=config.volume_ma_period,
+            adx_period=config.adx_period,
+            regime_bb_width_low=config.regime_bb_width_low,
+            regime_bb_width_high=config.regime_bb_width_high,
+            regime_adx_threshold=config.regime_adx_threshold,
         )
         self._grid_engine = AdaptiveGrid(
             atr_multiplier=config.grid_spacing_atr_mult,
@@ -87,6 +92,13 @@ class TradingBot:
         self._selected_coins: list[str] = []
         self._last_coin_select: datetime | None = None
         self._trade_log = get_trade_logger()
+
+        # Paper 모드 잔고 추적
+        self._paper_available_krw: float = config.paper_balance
+        self._paper_total_value: float = config.paper_balance
+
+        # 그리드 리사이클 쿨다운 추적 (market → 완료 시각)
+        self._grid_completed_at: dict[str, datetime] = {}
 
     async def start(self) -> None:
         """봇 시작."""
@@ -136,11 +148,25 @@ class TradingBot:
 
         await self._shutdown()
 
-    async def _main_loop(self) -> None:
-        """1분 주기 메인 루프."""
+    def _get_available_krw(self) -> float:
+        """Paper 모드 가용 잔고 반환."""
+        return self._paper_available_krw
 
-        # 1. 잔고 확인 + 드로다운 체크
-        if not self._paper_mode:
+    async def _main_loop(self) -> None:
+        """주기 메인 루프."""
+
+        # 1. 잔고 확인 + 드로다운 체크 (Paper 모드 포함)
+        if self._paper_mode:
+            # Paper 모드: 그리드 포지션 가치 추산
+            current_total = self._paper_available_krw
+            # 활성 그리드의 체결된 매수 레벨 가치 추산은 단순화
+            risk_check = self._risk.check_drawdown(current_total)
+            if risk_check.should_close_all:
+                logger.error(f"[PAPER] 드로다운 한도 초과! {risk_check.reason}")
+                await self._close_all_positions()
+                self._running = False
+                return
+        else:
             summary = await self._portfolio.get_summary()
             risk_check = self._risk.check_drawdown(summary.total_value)
 
@@ -152,14 +178,14 @@ class TradingBot:
 
             self._portfolio.log_summary(summary)
 
-        # 2. 코인 재선별 (4시간마다)
+        # 2. 코인 재선별
         await self._maybe_reselect_coins()
 
         if not self._selected_coins:
             logger.warning("선별된 코인 없음, 대기 중...")
             return
 
-        # 3. 데이터 수집 (병렬)
+        # 3. 데이터 수집
         logger.info(f"데이터 수집 중: {', '.join(self._selected_coins)}")
         candle_data = await self._fetcher.fetch_multiple(
             self._selected_coins, self._config.candle_unit, 200
@@ -204,9 +230,34 @@ class TradingBot:
 
         logger.info(f"다음 체크까지 {self._config.check_interval_sec}초 대기...")
 
+    def _is_grid_completed(self, grid: Grid) -> bool:
+        """그리드가 완료되었는지 확인 (모든 활성 매도 체결 완료)."""
+        filled_sells = [l for l in grid.sell_levels if l.status == GridStatus.FILLED and l.volume > 0]
+        active_orders = [l for l in grid.levels if l.status == GridStatus.ACTIVE]
+        has_volume_sells = any(l.volume > 0 for l in grid.sell_levels)
+        return bool(filled_sells) and not active_orders and has_volume_sells
+
+    def _update_adaptive_stop_loss(self, grid: Grid) -> None:
+        """체결된 레벨 기준으로 손절가 동적 조정."""
+        filled_buys = [l for l in grid.buy_levels if l.status == GridStatus.FILLED]
+        if filled_buys:
+            lowest_filled = min(l.price for l in filled_buys)
+            new_stop = self._grid_engine._round_to_tick(
+                lowest_filled * (1 - self._config.stop_loss_pct), lowest_filled
+            )
+            grid.stop_loss_price = new_stop
+
+    def _is_recycle_cooldown_passed(self, market: str) -> bool:
+        """그리드 리사이클 쿨다운 경과 여부."""
+        if market not in self._grid_completed_at:
+            return True
+        elapsed = datetime.now() - self._grid_completed_at[market]
+        # 쿨다운 = candle_unit(분) × cooldown_candles
+        cooldown_min = self._config.candle_unit * self._config.grid_recycle_cooldown_candles
+        return elapsed >= timedelta(minutes=cooldown_min)
+
     async def _process_market(self, market: str, df: pd.DataFrame) -> None:
         """개별 마켓 처리 로직."""
-        import pandas as pd
 
         # 지표 계산
         analyzed = TechnicalIndicators.calculate_all(
@@ -216,6 +267,7 @@ class TradingBot:
             bb_std=self._config.bb_std,
             atr_period=self._config.atr_period,
             vol_period=self._config.volume_ma_period,
+            adx_period=self._config.adx_period,
         )
 
         latest = analyzed.iloc[-1]
@@ -233,6 +285,9 @@ class TradingBot:
             else:
                 grid = await self._order_mgr.sync_orders(grid)
 
+            # [FIX] 적응형 손절가: 체결된 레벨 기준으로 갱신
+            self._update_adaptive_stop_loss(grid)
+
             # 손절 체크
             if current_price <= grid.stop_loss_price:
                 logger.warning(f"손절가 도달: {market} {current_price:,.0f} <= {grid.stop_loss_price:,.0f}")
@@ -242,27 +297,36 @@ class TradingBot:
                 del self._active_grids[market]
                 return
 
-            # ATR 변화로 그리드 재조정
-            if pd.notna(current_atr) and self._grid_engine.should_update_grid(
-                current_atr, grid.atr_at_creation
-            ):
-                logger.info(f"ATR 변화 감지, 그리드 재조정: {market}")
-                await self._order_mgr.cancel_all_orders(market)
+            # [FIX] 그리드 완료 감지
+            if self._is_grid_completed(grid):
+                logger.info(f"그리드 완료! 모든 매도 체결: {market}")
+                self._grid_completed_at[market] = datetime.now()
                 del self._active_grids[market]
-                # 아래에서 새 그리드 생성
+                # Section C로 폴스루하여 리사이클 진입 가능
+            else:
+                # ATR 변화로 그리드 재조정
+                if pd.notna(current_atr) and self._grid_engine.should_update_grid(
+                    current_atr, grid.atr_at_creation
+                ):
+                    logger.info(f"ATR 변화 감지, 그리드 재조정: {market}")
+                    await self._order_mgr.cancel_all_orders(market)
+                    if not self._paper_mode:
+                        await self._order_mgr.emergency_sell(market)
+                    del self._active_grids[market]
+                    return  # [FIX] return 추가 - 좀비 그리드 방지
 
-            # RSI 과매수 이익 실현
-            rsi_val = latest["rsi"]
-            if rsi_val > self._config.rsi_overbought:
-                logger.info(f"RSI 과매수 ({rsi_val:.1f}), 이익 실현: {market}")
-                await self._order_mgr.cancel_all_orders(market)
-                if not self._paper_mode:
-                    await self._order_mgr.emergency_sell(market)
-                del self._active_grids[market]
+                # RSI 과매수 이익 실현
+                rsi_val = latest["rsi"]
+                if rsi_val > self._config.rsi_overbought:
+                    logger.info(f"RSI 과매수 ({rsi_val:.1f}), 이익 실현: {market}")
+                    await self._order_mgr.cancel_all_orders(market)
+                    if not self._paper_mode:
+                        await self._order_mgr.emergency_sell(market)
+                    del self._active_grids[market]
+                    return
+
+                self._active_grids[market] = grid
                 return
-
-            self._active_grids[market] = grid
-            return
 
         # ── B. 모멘텀 포지션 관리 ──
         if market in self._momentum_positions:
@@ -271,42 +335,34 @@ class TradingBot:
 
         # ── C. 새로운 진입 신호 확인 ──
 
+        # C.0: 그리드 리사이클 (완료 직후 재진입)
+        if (
+            self._config.grid_recycle_enabled
+            and market in self._grid_completed_at
+            and self._is_recycle_cooldown_passed(market)
+        ):
+            recycle_signal = self._signal_engine.generate_recycle_signal(
+                df, self._config.grid_recycle_rsi_threshold, market
+            )
+            if recycle_signal.type == SignalType.BUY and recycle_signal.is_actionable:
+                logger.info(
+                    f"그리드 리사이클 | {market} | 신뢰도: {recycle_signal.confidence:.2f} | "
+                    f"이유: {', '.join(recycle_signal.reasons)}"
+                )
+                await self._enter_grid(market, df, recycle_signal, current_price, current_atr)
+                del self._grid_completed_at[market]
+                return
+
         # C.1: Mean Reversion 신호 (우선)
-        signal = self._signal_engine.generate_signal(df, market)
+        signal_result = self._signal_engine.generate_signal(df, market)
 
-        if signal.type == SignalType.BUY and signal.is_actionable:
+        if signal_result.type == SignalType.BUY and signal_result.is_actionable:
             logger.info(
-                f"매수 신호 | {market} | 신뢰도: {signal.confidence:.2f} | "
-                f"이유: {', '.join(signal.reasons)}"
+                f"매수 신호 | {market} | 신뢰도: {signal_result.confidence:.2f} | "
+                f"체제: {signal_result.regime.value} | "
+                f"이유: {', '.join(signal_result.reasons)}"
             )
-
-            # 포지션 사이징
-            available = await self._portfolio.get_available_krw() if not self._paper_mode else self._config.paper_balance
-            order_per_level = self._risk.calculate_position_size(
-                available, current_price, signal.confidence, self._config.grid_levels
-            )
-
-            if order_per_level <= 0:
-                logger.debug(f"주문금액 부족, 진입 불가: {market}")
-                return
-
-            # 그리드 생성
-            if pd.isna(current_atr) or current_atr <= 0:
-                logger.warning(f"ATR 계산 불가: {market}")
-                return
-
-            grid = self._grid_engine.calculate_grid(
-                market, current_price, current_atr, self._config.grid_levels
-            )
-
-            self._notifier.grid_created(market, self._config.grid_levels, current_price)
-
-            # 그리드 매수 주문
-            grid = await self._order_mgr.place_grid_orders(grid, order_per_level)
-            self._active_grids[market] = grid
-
-            # 그리드 상태 DB 저장
-            await self._db.save_grid_state(market, grid.to_json(), current_atr)
+            await self._enter_grid(market, df, signal_result, current_price, current_atr)
             return
 
         # C.2: 모멘텀 신호 (Mean Reversion 미발동 시)
@@ -323,7 +379,9 @@ class TradingBot:
                 return
 
         # C.3: 신호 없음
+        regime = signal_result.regime if signal_result else MarketRegime.TRANSITIONAL
         bb_lower = latest["bb_lower"]
+        adx_val = latest.get("adx", 0)
         vol = latest["volume"]
         vol_ma = latest["volume_ma"]
         vol_ratio = vol / vol_ma if pd.notna(vol_ma) and vol_ma > 0 else 0
@@ -331,9 +389,127 @@ class TradingBot:
             f"HOLD | {market} | "
             f"가격: {current_price:,.0f} | "
             f"RSI: {latest['rsi']:.1f} | "
+            f"ADX: {adx_val:.1f} | "
+            f"체제: {regime.value} | "
             f"BB하단: {bb_lower:,.0f} | "
             f"거래량비: {vol_ratio:.1f}x"
         )
+
+    async def _enter_grid(
+        self,
+        market: str,
+        df: pd.DataFrame,
+        signal_result: object,
+        current_price: float,
+        current_atr: float,
+    ) -> None:
+        """그리드 진입 공통 로직."""
+        # [FIX] Paper 모드 잔고 추적
+        if self._paper_mode:
+            available = self._get_available_krw()
+        else:
+            available = await self._portfolio.get_available_krw()
+
+        order_per_level = self._risk.calculate_position_size(
+            available, current_price, signal_result.confidence, self._config.grid_levels  # type: ignore[attr-defined]
+        )
+
+        if order_per_level <= 0:
+            logger.debug(f"주문금액 부족, 진입 불가: {market}")
+            return
+
+        if pd.isna(current_atr) or current_atr <= 0:
+            logger.warning(f"ATR 계산 불가: {market}")
+            return
+
+        grid = self._grid_engine.calculate_grid(
+            market, current_price, current_atr, self._config.grid_levels
+        )
+
+        self._notifier.grid_created(market, self._config.grid_levels, current_price)
+
+        # [FIX] 역피라미드 사이징: 레벨별 차등 배분
+        grid = await self._place_pyramid_grid_orders(grid, order_per_level)
+        self._active_grids[market] = grid
+
+        # Paper 잔고 차감
+        if self._paper_mode:
+            total_allocated = sum(l.volume * l.price for l in grid.buy_levels if l.status == GridStatus.ACTIVE)
+            self._paper_available_krw -= total_allocated
+
+        await self._db.save_grid_state(market, grid.to_json(), current_atr)
+
+    async def _place_pyramid_grid_orders(self, grid: Grid, base_order_krw: float) -> Grid:
+        """역피라미드 방식으로 그리드 매수 주문 배치.
+
+        상위 레벨(현재가 근처)에 더 많이, 하위 레벨(멀리)에 적게 배분.
+        가중치: [0.35, 0.25, 0.20, 0.12, 0.08] (5레벨 기준)
+        """
+        levels = len(grid.buy_levels)
+        if levels <= 0:
+            return grid
+
+        # 역피라미드 가중치 생성 (합=1.0)
+        raw_weights = [1.0 / (i + 1) for i in range(levels)]
+        total_weight = sum(raw_weights)
+        weights = [w / total_weight for w in raw_weights]
+
+        # 총 투자금 = base_order_krw × levels (원래 균등 배분 시 총액)
+        total_budget = base_order_krw * levels
+
+        for i, level in enumerate(grid.buy_levels):
+            if level.status != GridStatus.PENDING:
+                continue
+
+            level_krw = total_budget * weights[i]
+
+            # 최소 주문금액 체크
+            if level_krw < self._config.min_order_krw:
+                continue
+
+            volume = level_krw / level.price
+            valid, reason = self._risk.validate_order(
+                level_krw,
+                self._get_available_krw() if self._paper_mode else await self._portfolio.get_available_krw(),
+            )
+
+            if not valid:
+                logger.warning(f"주문 검증 실패 (레벨 {level.level}): {reason}")
+                continue
+
+            level.volume = volume
+
+            if self._paper_mode:
+                level.status = GridStatus.ACTIVE
+                level.order_uuid = f"paper-buy-{grid.market}-{level.level}"
+                self._trade_log.info(
+                    f"[PAPER] 매수 주문 | {grid.market} L{level.level} | "
+                    f"가격: {level.price:,.0f} | 수량: {volume:.8f} | "
+                    f"금액: {level_krw:,.0f} | 가중치: {weights[i]:.1%}"
+                )
+            else:
+                try:
+                    result = await self._client.place_order(
+                        market=grid.market,
+                        side="bid",
+                        volume=f"{volume:.8f}",
+                        price=str(int(level.price)),
+                        ord_type="limit",
+                    )
+                    level.order_uuid = result["uuid"]
+                    level.status = GridStatus.ACTIVE
+
+                    self._trade_log.info(
+                        f"매수 주문 | {grid.market} L{level.level} | "
+                        f"가격: {level.price:,.0f} | 수량: {volume:.8f} | "
+                        f"가중치: {weights[i]:.1%}"
+                    )
+                except Exception as e:
+                    logger.error(f"매수 주문 실패 (레벨 {level.level}): {e}")
+
+                await asyncio.sleep(0.15)
+
+        return grid
 
     # ── 모멘텀 전략 메서드 ─────────────────────────────
 
@@ -348,19 +524,19 @@ class TradingBot:
     async def _enter_momentum_position(
         self,
         market: str,
-        signal: object,
+        signal_obj: object,
         current_price: float,
         current_atr: float,
     ) -> None:
         """모멘텀 포지션 진입. 시장가 매수."""
-        available = (
-            await self._portfolio.get_available_krw()
-            if not self._paper_mode
-            else 500_000
-        )
+        # [FIX] Paper 모드 잔고 추적
+        if self._paper_mode:
+            available = self._get_available_krw()
+        else:
+            available = await self._portfolio.get_available_krw()
 
         order_krw = self._risk.calculate_momentum_size(
-            available, signal.confidence  # type: ignore[attr-defined]
+            available, signal_obj.confidence  # type: ignore[attr-defined]
         )
         if order_krw <= 0:
             logger.debug(f"모멘텀 주문금액 부족: {market}")
@@ -370,8 +546,8 @@ class TradingBot:
 
         logger.info(
             f"모멘텀 진입 | {market} | 가격: {current_price:,.0f} | "
-            f"금액: {order_krw:,.0f} KRW | 신뢰도: {signal.confidence:.2f} | "  # type: ignore[attr-defined]
-            f"이유: {', '.join(signal.reasons)}"  # type: ignore[attr-defined]
+            f"금액: {order_krw:,.0f} KRW | 신뢰도: {signal_obj.confidence:.2f} | "  # type: ignore[attr-defined]
+            f"이유: {', '.join(signal_obj.reasons)}"  # type: ignore[attr-defined]
         )
 
         pos = MomentumPosition(
@@ -392,6 +568,7 @@ class TradingBot:
         if self._paper_mode:
             pos.status = MomentumStatus.ACTIVE
             pos.order_uuid = f"paper-momentum-{market}"
+            self._paper_available_krw -= order_krw
             self._trade_log.info(
                 f"[PAPER] 모멘텀 매수 | {market} | "
                 f"가격: {current_price:,.0f} | 수량: {volume:.8f} | "
@@ -467,6 +644,8 @@ class TradingBot:
         pnl_krw, pnl_pct = pos.calculate_pnl(current_price)
 
         if self._paper_mode:
+            # Paper 잔고 복원 + 손익 반영
+            self._paper_available_krw += pos.order_krw + pnl_krw
             self._trade_log.info(
                 f"[PAPER] 모멘텀 매도 | {market} | "
                 f"가격: {current_price:,.0f} | "
@@ -515,7 +694,7 @@ class TradingBot:
                 await self._select_coins()
 
     async def _check_expired_positions(self) -> None:
-        """48시간 초과 포지션 정리."""
+        """포지션 유지시간 초과 정리."""
         expired = await self._db.get_expired_positions(
             self._config.max_position_age_hours
         )
@@ -568,10 +747,6 @@ class TradingBot:
     def stop(self) -> None:
         """외부에서 종료 요청."""
         self._running = False
-
-
-# pandas import (process_market에서 사용)
-import pandas as pd
 
 
 def parse_args() -> argparse.Namespace:

@@ -24,14 +24,18 @@ class TradingConfig:
 
     # ── 전략 파라미터 ───────────────────────────────────
     grid_levels: int = 5
-    grid_spacing_atr_mult: float = 0.5
+    grid_spacing_atr_mult: float = 2.0
     rsi_period: int = 14
-    rsi_oversold: float = 30.0
+    rsi_oversold: float = 25.0
     rsi_overbought: float = 70.0
     bb_period: int = 20
-    bb_std: float = 2.0
+    bb_std: float = 1.5
     atr_period: int = 14
     volume_ma_period: int = 20
+    adx_period: int = 14
+    regime_bb_width_low: float = 0.04    # BB Width < 4% → 횡보
+    regime_bb_width_high: float = 0.08   # BB Width > 8% → 강한 추세
+    regime_adx_threshold: float = 25.0   # ADX > 25 → 추세
 
     # ── 코인 선별 ───────────────────────────────────────
     max_coins: int = 1
@@ -44,16 +48,21 @@ class TradingConfig:
 
     # ── 리스크 관리 ─────────────────────────────────────
     max_per_coin_ratio: float = 0.50
-    stop_loss_pct: float = 0.05
+    stop_loss_pct: float = 0.03
     max_drawdown_pct: float = 0.10
-    max_position_age_hours: int = 48
+    max_position_age_hours: int = 168  # 4시간봉 기준 7일
+
+    # ── 그리드 리사이클 ────────────────────────────────
+    grid_recycle_enabled: bool = True
+    grid_recycle_rsi_threshold: float = 50.0  # 재진입 RSI 기준 (완화)
+    grid_recycle_cooldown_candles: int = 3    # 재진입 쿨다운
 
     # ── 실행 설정 ───────────────────────────────────────
     paper_balance: float = 100_000     # Paper 모드 초기 잔고
-    candle_unit: int = 1               # 1분봉
-    check_interval_sec: int = 60       # 1분마다 체크
+    candle_unit: int = 240             # 4시간봉
+    check_interval_sec: int = 900      # 15분마다 체크
     min_order_krw: float = 5_000       # Upbit 최소 주문금액
-    coin_reselect_hours: int = 4       # 4시간마다 코인 재선별
+    coin_reselect_hours: int = 24      # 24시간마다 코인 재선별
     upbit_fee_rate: float = 0.0005     # 0.05% 수수료
 
     # ── Rate Limit ──────────────────────────────────────

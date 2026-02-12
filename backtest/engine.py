@@ -74,6 +74,10 @@ class BacktestEngine:
             rsi_period=self._config.rsi_period,
             atr_period=self._config.atr_period,
             volume_ma_period=self._config.volume_ma_period,
+            adx_period=self._config.adx_period,
+            regime_bb_width_low=self._config.regime_bb_width_low,
+            regime_bb_width_high=self._config.regime_bb_width_high,
+            regime_adx_threshold=self._config.regime_adx_threshold,
         )
         self._grid_engine = AdaptiveGrid(
             atr_multiplier=self._config.grid_spacing_atr_mult,
@@ -87,7 +91,7 @@ class BacktestEngine:
             self._config.access_key, self._config.secret_key
         )
         try:
-            candles_needed = days * 24 * (60 // self._config.candle_unit)
+            candles_needed = days * 24 * 60 // self._config.candle_unit
             df = await client.get_candles_extended(
                 market, self._config.candle_unit, min(candles_needed, 10000)
             )
@@ -129,6 +133,7 @@ class BacktestEngine:
             bb_std=self._config.bb_std,
             atr_period=self._config.atr_period,
             vol_period=self._config.volume_ma_period,
+            adx_period=self._config.adx_period,
         )
 
         balance = initial_balance
@@ -182,13 +187,14 @@ class BacktestEngine:
             # 활성 그리드 처리
             if active_grid:
                 # 매수 체결 확인 (저가가 매수 레벨 이하)
+                just_filled_levels: set[int] = set()  # 동일봉 매수+매도 방지
                 for level in active_grid.buy_levels:
                     if level.status == GridStatus.ACTIVE and low <= level.price:
                         level.status = GridStatus.FILLED
                         fee = level.volume * level.price * self._config.upbit_fee_rate
                         total_fees += fee
                         balance -= level.volume * level.price + fee
-                        position_value += level.volume * price
+                        just_filled_levels.add(level.level)
 
                         # 대응 매도 레벨 활성화
                         for sl in active_grid.sell_levels:
@@ -197,20 +203,24 @@ class BacktestEngine:
                                 sl.volume = level.volume
 
                 # 매도 체결 확인 (고가가 매도 레벨 이상)
+                # 동일봉에 매수된 레벨은 매도 처리하지 않음 (look-ahead bias 방지)
                 for level in active_grid.sell_levels:
-                    if level.status == GridStatus.ACTIVE and level.volume > 0 and high >= level.price:
+                    if (level.status == GridStatus.ACTIVE
+                            and level.volume > 0
+                            and high >= level.price
+                            and level.level not in just_filled_levels):
                         level.status = GridStatus.FILLED
                         fee = level.volume * level.price * self._config.upbit_fee_rate
                         total_fees += fee
                         sell_value = level.volume * level.price - fee
                         balance += sell_value
-                        position_value -= level.volume * price
 
-                        # 대응 매수 레벨 가격 찾기
+                        # 대응 매수 레벨 가격 찾기 + CANCELLED 처리 (이중 계산 방지)
                         entry_price = 0
                         for bl in active_grid.buy_levels:
                             if bl.level == level.level:
                                 entry_price = bl.price
+                                bl.status = GridStatus.CANCELLED  # 매도 완료 → 포지션 없음
                                 break
 
                         pnl = (level.price - entry_price) * level.volume - fee * 2
@@ -282,7 +292,7 @@ class BacktestEngine:
             # 신규 진입 확인 (그리드 없을 때만)
             if active_grid is None:
                 window = analyzed.iloc[max(0, i - 200):i + 1]
-                signal = self._signal_engine.generate_signal(window, market)
+                signal = self._signal_engine._evaluate_signal(window, market)
 
                 if signal.type == SignalType.BUY and signal.is_actionable and pd.notna(atr) and atr > 0:
                     order_per_level = (
