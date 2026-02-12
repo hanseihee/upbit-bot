@@ -48,7 +48,11 @@ class TradingBot:
             config.access_key, config.secret_key, config.api_url
         )
         self._db = TradeDB(config.db_path)
-        self._notifier = Notifier()
+        self._notifier = Notifier(
+            bot_token=config.telegram_bot_token,
+            chat_id=config.telegram_chat_id,
+            enabled=config.telegram_enabled,
+        )
         self._fetcher = CandleFetcher(self._client)
         self._portfolio = Portfolio(self._client)
         self._risk = RiskManager(config, self._notifier)
@@ -112,6 +116,10 @@ class TradingBot:
 
         # 코인 초기 선별
         await self._select_coins()
+
+        # 시작 알림
+        balance = self._config.paper_balance if self._paper_mode else await self._portfolio.get_total_value()
+        self._notifier.bot_started(mode_str, balance, self._active_markets)
 
         # 메인 루프
         self._running = True
@@ -406,10 +414,7 @@ class TradingBot:
         pos.update_trailing_stop(current_price, pos.atr_at_entry)
         self._momentum_positions[market] = pos
 
-        self._notifier.notify(
-            "모멘텀 진입",
-            f"{market} | 가격: {current_price:,.0f} | 트레일링: {pos.trailing_stop_price:,.0f}",
-        )
+        self._notifier.momentum_entry(market, current_price, order_krw)
 
         await self._db.save_momentum_state(market, pos.to_json())
 
@@ -480,11 +485,7 @@ class TradingBot:
                 logger.error(f"모멘텀 매도 실패 ({market}): {e}")
                 return
 
-        result_icon = "수익" if pnl_pct > 0 else "손실"
-        self._notifier.notify(
-            f"모멘텀 청산 ({result_icon})",
-            f"{market} | PnL: {pnl_krw:+,.0f} KRW ({pnl_pct:+.2%}) | {reason}",
-        )
+        self._notifier.momentum_exit(market, current_price, pnl_krw, pnl_pct, reason)
 
         await self._db.close_momentum_state(market)
         del self._momentum_positions[market]
@@ -557,6 +558,9 @@ class TradingBot:
         """봇 종료."""
         logger.info("봇 종료 중...")
         self._running = False
+        self._notifier.bot_stopped()
+        await asyncio.sleep(1)  # 텔레그램 전송 대기
+        await self._notifier.close()
         await self._db.close()
         await self._client.close()
         logger.info("봇 종료 완료")

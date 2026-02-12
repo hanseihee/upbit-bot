@@ -75,6 +75,11 @@ class TradingConfig:
     # ── 신호 ────────────────────────────────────────────
     min_signal_confidence: float = 0.6
 
+    # ── 텔레그램 ──────────────────────────────────────────
+    telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
+    telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+    telegram_enabled: bool = field(default_factory=lambda: bool(os.getenv("TELEGRAM_BOT_TOKEN", "")))
+
     # ── 경로 ────────────────────────────────────────────
     db_path: str = field(
         default_factory=lambda: str(
