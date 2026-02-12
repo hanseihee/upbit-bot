@@ -82,6 +82,18 @@ class Portfolio:
                 "avg_buy_price": avg_price,
             }
 
+        # 유효 마켓 필터링 (상장폐지 코인 제외)
+        if coin_markets:
+            try:
+                all_markets = await self._client.get_markets()
+                valid_set = {m["market"] for m in all_markets}
+                invalid = [m for m in coin_markets if m not in valid_set]
+                if invalid:
+                    logger.debug(f"상장폐지 코인 제외: {invalid}")
+                coin_markets = [m for m in coin_markets if m in valid_set]
+            except Exception:
+                pass
+
         # 현재가 조회
         if coin_markets:
             tickers = await self._client.get_ticker(coin_markets)

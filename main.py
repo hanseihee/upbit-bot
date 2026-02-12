@@ -119,7 +119,7 @@ class TradingBot:
 
         # 시작 알림
         balance = self._config.paper_balance if self._paper_mode else await self._portfolio.get_total_value()
-        self._notifier.bot_started(mode_str, balance, self._active_markets)
+        self._notifier.bot_started(mode_str, balance, self._selected_coins)
 
         # 메인 루프
         self._running = True
