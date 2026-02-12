@@ -23,18 +23,18 @@ class TradingConfig:
     secret_key: str = field(default_factory=lambda: os.getenv("UPBIT_SECRET_KEY", ""))
 
     # ── 전략 파라미터 ───────────────────────────────────
-    grid_levels: int = 5
-    grid_spacing_atr_mult: float = 2.0
+    grid_levels: int = 4
+    grid_spacing_atr_mult: float = 5.0
     rsi_period: int = 14
-    rsi_oversold: float = 25.0
+    rsi_oversold: float = 30.0
     rsi_overbought: float = 70.0
     bb_period: int = 20
-    bb_std: float = 1.5
+    bb_std: float = 2.0
     atr_period: int = 14
     volume_ma_period: int = 20
     adx_period: int = 14
-    regime_bb_width_low: float = 0.04    # BB Width < 4% → 횡보
-    regime_bb_width_high: float = 0.08   # BB Width > 8% → 강한 추세
+    regime_bb_width_low: float = 0.005   # BB Width < 0.5% → 횡보
+    regime_bb_width_high: float = 0.02   # BB Width > 2% → 강한 추세
     regime_adx_threshold: float = 25.0   # ADX > 25 → 추세
 
     # ── 코인 선별 ───────────────────────────────────────
@@ -48,19 +48,19 @@ class TradingConfig:
 
     # ── 리스크 관리 ─────────────────────────────────────
     max_per_coin_ratio: float = 0.50
-    stop_loss_pct: float = 0.03
+    stop_loss_pct: float = 0.015
     max_drawdown_pct: float = 0.10
-    max_position_age_hours: int = 168  # 4시간봉 기준 7일
+    max_position_age_hours: int = 2  # 1분봉 기준 2시간
 
     # ── 그리드 리사이클 ────────────────────────────────
     grid_recycle_enabled: bool = True
-    grid_recycle_rsi_threshold: float = 50.0  # 재진입 RSI 기준 (완화)
-    grid_recycle_cooldown_candles: int = 3    # 재진입 쿨다운
+    grid_recycle_rsi_threshold: float = 45.0  # 재진입 RSI 기준
+    grid_recycle_cooldown_candles: int = 30   # 재진입 쿨다운 (30분)
 
     # ── 실행 설정 ───────────────────────────────────────
     paper_balance: float = 100_000     # Paper 모드 초기 잔고
-    candle_unit: int = 240             # 4시간봉
-    check_interval_sec: int = 900      # 15분마다 체크
+    candle_unit: int = 1               # 1분봉
+    check_interval_sec: int = 45       # 45초마다 체크
     min_order_krw: float = 5_000       # Upbit 최소 주문금액
     coin_reselect_hours: int = 24      # 24시간마다 코인 재선별
     upbit_fee_rate: float = 0.0005     # 0.05% 수수료
@@ -73,13 +73,13 @@ class TradingConfig:
     momentum_enabled: bool = True
     momentum_rsi_threshold: float = 55.0       # RSI 모멘텀 기준
     momentum_volume_mult: float = 1.5          # 거래량 배수 기준
-    momentum_trailing_stop_pct: float = 0.02   # 트레일링 스톱 2%
-    momentum_atr_stop_mult: float = 1.5        # ATR 스톱 배수
-    momentum_max_hold_minutes: int = 30        # 최대 보유 시간
-    momentum_hard_stop_pct: float = 0.03       # 하드 손절 3%
-    momentum_position_ratio: float = 0.30      # 가용잔고 대비 30%
+    momentum_trailing_stop_pct: float = 0.008  # 트레일링 스톱 0.8%
+    momentum_atr_stop_mult: float = 2.0        # ATR 스톱 배수
+    momentum_max_hold_minutes: int = 15        # 최대 보유 시간
+    momentum_hard_stop_pct: float = 0.012      # 하드 손절 1.2%
+    momentum_position_ratio: float = 0.20      # 가용잔고 대비 20%
     momentum_max_positions: int = 1            # 최대 동시 포지션
-    momentum_rsi_exit: float = 75.0            # RSI 청산 기준
+    momentum_rsi_exit: float = 72.0            # RSI 청산 기준
 
     # ── 신호 ────────────────────────────────────────────
     min_signal_confidence: float = 0.6
