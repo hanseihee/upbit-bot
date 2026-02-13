@@ -24,19 +24,23 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(self._max, self._tokens + elapsed * (self._max / self._period))
-            self._last_refill = now
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last_refill
+                self._tokens = min(self._max, self._tokens + elapsed * (self._max / self._period))
+                self._last_refill = now
 
-            if self._tokens < 1:
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
+
                 wait = (1 - self._tokens) * (self._period / self._max)
-                logger.debug(f"Rate limit 대기: {wait:.2f}s")
-                await asyncio.sleep(wait)
                 self._tokens = 0
-            else:
-                self._tokens -= 1
+
+            # lock 밖에서 sleep → 다른 코루틴 블로킹 방지
+            logger.debug(f"Rate limit 대기: {wait:.2f}s")
+            await asyncio.sleep(wait)
 
 
 class UpbitClient:

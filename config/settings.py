@@ -47,15 +47,15 @@ class TradingConfig:
     max_spread_pct: float = 0.003           # 스프레드 0.3% 이하
 
     # ── 리스크 관리 ─────────────────────────────────────
-    max_per_coin_ratio: float = 0.50
-    stop_loss_pct: float = 0.015
-    max_drawdown_pct: float = 0.10
-    max_position_age_hours: int = 2  # 1분봉 기준 2시간
+    max_per_coin_ratio: float = 0.35     # 코인당 최대 35% (보수적)
+    stop_loss_pct: float = 0.008         # 0.8% 손절 (빠른 컷)
+    max_drawdown_pct: float = 0.07       # 총 -7% 드로다운 한도
+    max_position_age_hours: int = 6      # 5분봉 기준 6시간
 
     # ── 그리드 리사이클 ────────────────────────────────
     grid_recycle_enabled: bool = True
-    grid_recycle_rsi_threshold: float = 45.0  # 재진입 RSI 기준
-    grid_recycle_cooldown_candles: int = 30   # 재진입 쿨다운 (30분)
+    grid_recycle_rsi_threshold: float = 40.0  # 재진입 RSI 기준 (더 보수적)
+    grid_recycle_cooldown_candles: int = 12   # 재진입 쿨다운 (5분봉×12 = 60분)
 
     # ── 실행 설정 ───────────────────────────────────────
     paper_balance: float = 1_000_000   # Paper 모드 초기 잔고
@@ -70,7 +70,7 @@ class TradingConfig:
     order_rate_limit: int = 8          # 주문 API 초당 8회
 
     # ── 모멘텀 전략 ──────────────────────────────────────
-    momentum_enabled: bool = True
+    momentum_enabled: bool = False       # 비활성화 (단기 타임프레임 부적합)
     momentum_rsi_threshold: float = 55.0       # RSI 모멘텀 기준
     momentum_volume_mult: float = 1.2          # 거래량 배수 기준
     momentum_trailing_stop_pct: float = 0.008  # 트레일링 스톱 0.8%
@@ -83,6 +83,15 @@ class TradingConfig:
 
     # ── 신호 ────────────────────────────────────────────
     min_signal_confidence: float = 0.45
+
+    # ── 다중 타임프레임 ──────────────────────────────────
+    higher_tf_unit: int = 15             # 상위 타임프레임 (15분봉)
+    higher_tf_candle_count: int = 100    # 상위 TF 캔들 수 (25시간)
+
+    # ── 거래 시간대 필터 ─────────────────────────────────
+    enable_trading_hours: bool = True    # 시간대 필터 활성화
+    trading_start_hour: int = 9          # 거래 시작 KST 09:00
+    trading_end_hour: int = 2            # 거래 종료 KST 02:00 (다음날)
 
     # ── 텔레그램 ──────────────────────────────────────────
     telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))

@@ -100,12 +100,35 @@ class TradingBot:
         # 그리드 리사이클 쿨다운 추적 (market → 완료 시각)
         self._grid_completed_at: dict[str, datetime] = {}
 
+        # 상위 타임프레임 캔들 캐시 (market → DataFrame)
+        self._higher_tf_data: dict[str, pd.DataFrame] = {}
+
     async def start(self) -> None:
         """봇 시작."""
         mode_str = "PAPER" if self._paper_mode else "LIVE"
         logger.info(f"{'='*50}")
         logger.info(f"Upbit Trading Bot 시작 [{mode_str} 모드]")
         logger.info(f"{'='*50}")
+        logger.info(
+            f"설정 | 캔들: {self._config.candle_unit}분봉 | "
+            f"상위TF: {self._config.higher_tf_unit}분봉 | "
+            f"체크: {self._config.check_interval_sec}초"
+        )
+        logger.info(
+            f"설정 | 그리드: {self._config.grid_levels}단 | "
+            f"ATR배수: {self._config.grid_spacing_atr_mult} | "
+            f"손절: {self._config.stop_loss_pct:.1%}"
+        )
+        logger.info(
+            f"설정 | 코인비율: {self._config.max_per_coin_ratio:.0%} | "
+            f"신뢰도: {self._config.min_signal_confidence} | "
+            f"모멘텀: {'ON' if self._config.momentum_enabled else 'OFF'}"
+        )
+        if self._config.enable_trading_hours:
+            logger.info(
+                f"설정 | 거래시간: {self._config.trading_start_hour:02d}:00 ~ "
+                f"{self._config.trading_end_hour:02d}:00 KST"
+            )
 
         # 설정 검증
         if not self._paper_mode:
@@ -125,6 +148,9 @@ class TradingBot:
         else:
             self._risk.set_initial_balance(self._config.paper_balance)
             logger.info(f"[PAPER] 초기 잔고: {self._config.paper_balance:,.0f} KRW")
+
+        # 활성 그리드 상태 복원 (재시작 시)
+        await self._restore_grid_states()
 
         # 코인 초기 선별
         await self._select_coins()
@@ -152,14 +178,41 @@ class TradingBot:
         """Paper 모드 가용 잔고 반환."""
         return self._paper_available_krw
 
+    def _is_trading_hours(self) -> bool:
+        """거래 허용 시간대 확인 (KST 기준).
+
+        예: start=9, end=2 → 09:00 ~ 다음날 02:00 허용
+        자정을 넘는 경우 자동 처리.
+        """
+        if not self._config.enable_trading_hours:
+            return True
+
+        hour = datetime.now().hour
+        start = self._config.trading_start_hour
+        end = self._config.trading_end_hour
+
+        if start <= end:
+            # 같은 날 범위 (예: 9 ~ 18)
+            return start <= hour < end
+        else:
+            # 자정을 넘는 범위 (예: 9 ~ 2 = 09:00 ~ 다음날 02:00)
+            return hour >= start or hour < end
+
     async def _main_loop(self) -> None:
         """주기 메인 루프."""
 
         # 1. 잔고 확인 + 드로다운 체크 (Paper 모드 포함)
         if self._paper_mode:
-            # Paper 모드: 그리드 포지션 가치 추산
-            current_total = self._paper_available_krw
-            # 활성 그리드의 체결된 매수 레벨 가치 추산은 단순화
+            # Paper 모드: 현금 + 포지션 가치로 정확한 총자산 계산
+            position_value = 0.0
+            for grid in self._active_grids.values():
+                for level in grid.buy_levels:
+                    if level.status in (GridStatus.ACTIVE, GridStatus.FILLED) and level.volume > 0:
+                        position_value += level.volume * level.price
+            for pos in self._momentum_positions.values():
+                if pos.status == MomentumStatus.ACTIVE:
+                    position_value += pos.order_krw
+            current_total = self._paper_available_krw + position_value
             risk_check = self._risk.check_drawdown(current_total)
             if risk_check.should_close_all:
                 logger.error(f"[PAPER] 드로다운 한도 초과! {risk_check.reason}")
@@ -178,20 +231,43 @@ class TradingBot:
 
             self._portfolio.log_summary(summary)
 
-        # 2. 코인 재선별
+        # 2. 거래 시간대 확인
+        if not self._is_trading_hours():
+            # 거래 시간 외: 기존 포지션만 관리 (손절/이익실현), 신규 진입 차단
+            if self._active_grids or self._momentum_positions:
+                logger.info("거래 시간 외 - 기존 포지션 관리만 수행")
+                # 기존 포지션 관리를 위해 데이터는 수집
+            else:
+                hour = datetime.now().hour
+                logger.info(
+                    f"거래 시간 외 ({hour}시) - "
+                    f"허용: {self._config.trading_start_hour}시~"
+                    f"{self._config.trading_end_hour}시 | 대기 중..."
+                )
+                return
+
+        # 3. 코인 재선별
         await self._maybe_reselect_coins()
 
         if not self._selected_coins:
             logger.warning("선별된 코인 없음, 대기 중...")
             return
 
-        # 3. 데이터 수집
+        # 4. 데이터 수집 (메인 타임프레임)
         logger.info(f"데이터 수집 중: {', '.join(self._selected_coins)}")
         candle_data = await self._fetcher.fetch_multiple(
             self._selected_coins, self._config.candle_unit, 200
         )
 
-        # 4~7. 코인별 처리
+        # 5. 상위 타임프레임 데이터 수집
+        higher_tf_data = await self._fetcher.fetch_multiple(
+            self._selected_coins,
+            self._config.higher_tf_unit,
+            self._config.higher_tf_candle_count,
+        )
+        self._higher_tf_data = higher_tf_data
+
+        # 6~9. 코인별 처리
         for market in self._selected_coins:
             df = candle_data.get(market)
             if df is None or df.empty:
@@ -203,17 +279,17 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"마켓 처리 오류 ({market}): {e}")
 
-        # 8. 포지션 유지시간 체크
+        # 10. 포지션 유지시간 체크
         await self._check_expired_positions()
 
-        # 9. 활성 그리드 현황
+        # 11. 활성 그리드 현황
         if self._active_grids:
             for m, g in self._active_grids.items():
                 active_buys = sum(1 for l in g.buy_levels if l.status == GridStatus.ACTIVE)
                 filled_buys = sum(1 for l in g.buy_levels if l.status == GridStatus.FILLED)
                 logger.info(f"그리드 | {m} | 대기매수: {active_buys} | 체결매수: {filled_buys}")
 
-        # 10. 모멘텀 포지션 현황
+        # 12. 모멘텀 포지션 현황
         if self._momentum_positions:
             for m, pos in self._momentum_positions.items():
                 pnl_pct = (
@@ -229,6 +305,34 @@ class TradingBot:
                 )
 
         logger.info(f"다음 체크까지 {self._config.check_interval_sec}초 대기...")
+
+    def _paper_close_grid(self, grid: Grid, current_price: float, reason: str) -> None:
+        """Paper 모드: 그리드 청산 시 잔고 복원.
+
+        - 미체결 매수(ACTIVE): 예약금 원복
+        - 체결 매수(FILLED, 아직 매도 안 됨): 현재가로 시장가 매도 간주
+        """
+        restored = 0.0
+        for level in grid.buy_levels:
+            if level.status == GridStatus.ACTIVE and level.volume > 0:
+                # 미체결 → 예약금 원복
+                restored += level.volume * level.price
+            elif level.status == GridStatus.FILLED and level.volume > 0:
+                # 체결된 매수 → 현재가로 청산
+                sell_value = level.volume * current_price
+                restored += sell_value
+                pnl = sell_value - (level.volume * level.price)
+                self._trade_log.info(
+                    f"[PAPER] {reason} 청산 | {grid.market} L{level.level} | "
+                    f"매수가: {level.price:,.0f} → 현재가: {current_price:,.0f} | "
+                    f"PnL: {pnl:+,.0f} KRW"
+                )
+        if restored > 0:
+            self._paper_available_krw += restored
+            self._trade_log.info(
+                f"[PAPER] 그리드 청산 잔고 반환 | {grid.market} | "
+                f"+{restored:,.0f} KRW | 잔고: {self._paper_available_krw:,.0f}"
+            )
 
     def _is_grid_completed(self, grid: Grid) -> bool:
         """그리드가 완료되었는지 확인 (모든 활성 매도 체결 완료)."""
@@ -281,7 +385,26 @@ class TradingBot:
 
             # 주문 동기화
             if self._paper_mode:
+                # 매도 체결 전 상태 스냅샷 (Bug 1 fix: 잔고 반환 추적)
+                prev_filled_sells = {
+                    l.level for l in grid.sell_levels
+                    if l.status == GridStatus.FILLED
+                }
                 grid = await self._order_mgr.check_paper_fills(grid, current_price)
+
+                # 새로 체결된 매도 레벨 → paper 잔고 반환
+                for level in grid.sell_levels:
+                    if (
+                        level.status == GridStatus.FILLED
+                        and level.level not in prev_filled_sells
+                        and level.volume > 0
+                    ):
+                        sell_krw = level.price * level.volume
+                        self._paper_available_krw += sell_krw
+                        self._trade_log.info(
+                            f"[PAPER] 매도 체결 잔고 반환 | {market} L{level.level} | "
+                            f"+{sell_krw:,.0f} KRW | 잔고: {self._paper_available_krw:,.0f}"
+                        )
             else:
                 grid = await self._order_mgr.sync_orders(grid)
 
@@ -292,7 +415,10 @@ class TradingBot:
             if current_price <= grid.stop_loss_price:
                 logger.warning(f"손절가 도달: {market} {current_price:,.0f} <= {grid.stop_loss_price:,.0f}")
                 await self._order_mgr.cancel_all_orders(market)
-                if not self._paper_mode:
+                if self._paper_mode:
+                    # Paper 모드: 체결된 매수분을 현재가로 손절 청산
+                    self._paper_close_grid(grid, current_price, "손절")
+                else:
                     await self._order_mgr.emergency_sell(market)
                 del self._active_grids[market]
                 return
@@ -310,7 +436,9 @@ class TradingBot:
                 ):
                     logger.info(f"ATR 변화 감지, 그리드 재조정: {market}")
                     await self._order_mgr.cancel_all_orders(market)
-                    if not self._paper_mode:
+                    if self._paper_mode:
+                        self._paper_close_grid(grid, current_price, "ATR 재조정")
+                    else:
                         await self._order_mgr.emergency_sell(market)
                     del self._active_grids[market]
                     return  # [FIX] return 추가 - 좀비 그리드 방지
@@ -320,7 +448,9 @@ class TradingBot:
                 if rsi_val > self._config.rsi_overbought:
                     logger.info(f"RSI 과매수 ({rsi_val:.1f}), 이익 실현: {market}")
                     await self._order_mgr.cancel_all_orders(market)
-                    if not self._paper_mode:
+                    if self._paper_mode:
+                        self._paper_close_grid(grid, current_price, "이익실현")
+                    else:
                         await self._order_mgr.emergency_sell(market)
                     del self._active_grids[market]
                     return
@@ -335,7 +465,25 @@ class TradingBot:
 
         # ── C. 새로운 진입 신호 확인 ──
 
-        # C.0: 그리드 리사이클 (완료 직후 재진입)
+        # C.0: 거래 시간 외 신규 진입 차단
+        if not self._is_trading_hours():
+            logger.debug(f"거래 시간 외 - 신규 진입 차단: {market}")
+            return
+
+        # C.1: 상위 타임프레임 추세 필터
+        df_higher = self._higher_tf_data.get(market)
+        if df_higher is not None and not df_higher.empty:
+            htf_safe, htf_reasons = self._signal_engine.check_higher_tf_trend(df_higher)
+            if not htf_safe:
+                logger.info(
+                    f"상위TF 진입 차단 | {market} | "
+                    f"이유: {', '.join(htf_reasons)}"
+                )
+                return
+        else:
+            logger.debug(f"상위 TF 데이터 없음, 진입 허용: {market}")
+
+        # C.2: 그리드 리사이클 (완료 직후 재진입)
         if (
             self._config.grid_recycle_enabled
             and market in self._grid_completed_at
@@ -353,7 +501,7 @@ class TradingBot:
                 del self._grid_completed_at[market]
                 return
 
-        # C.1: Mean Reversion 신호 (우선)
+        # C.3: Mean Reversion 신호 (우선)
         signal_result = self._signal_engine.generate_signal(df, market)
 
         if signal_result.type == SignalType.BUY and signal_result.is_actionable:
@@ -365,7 +513,7 @@ class TradingBot:
             await self._enter_grid(market, df, signal_result, current_price, current_atr)
             return
 
-        # C.2: 모멘텀 신호 (Mean Reversion 미발동 시)
+        # C.4: 모멘텀 신호 (Mean Reversion 미발동 시)
         if self._config.momentum_enabled:
             momentum_signal = self._signal_engine.generate_momentum_signal(df, market)
             if (
@@ -378,7 +526,7 @@ class TradingBot:
                 )
                 return
 
-        # C.3: 신호 없음
+        # C.5: 신호 없음
         regime = signal_result.regime if signal_result else MarketRegime.TRANSITIONAL
         bb_lower = latest["bb_lower"]
         adx_val = latest.get("adx", 0)
@@ -719,9 +867,12 @@ class TradingBot:
         logger.error("전체 포지션 청산 시작!")
 
         # 그리드 포지션 청산
-        for market in list(self._active_grids.keys()):
+        for market, grid in list(self._active_grids.items()):
             await self._order_mgr.cancel_all_orders(market)
-            if not self._paper_mode:
+            if self._paper_mode:
+                # Paper: base_price를 현재가 대용으로 사용 (가격 조회 불가 상황)
+                self._paper_close_grid(grid, grid.base_price, "전체청산")
+            else:
                 await self._order_mgr.emergency_sell(market)
         self._active_grids.clear()
 
@@ -733,6 +884,53 @@ class TradingBot:
         self._momentum_positions.clear()
 
         logger.error("전체 포지션 청산 완료")
+
+    async def _restore_grid_states(self) -> None:
+        """DB에서 활성 그리드 상태 복원 (재시작 시)."""
+        try:
+            active_grids = await self._db.get_all_active_grids()
+        except Exception as e:
+            logger.error(f"그리드 상태 조회 실패: {e}")
+            return
+
+        restored = 0
+        for grid_row in active_grids:
+            market = grid_row["market"]
+            try:
+                grid = Grid.from_json(grid_row["grid_data"])
+
+                # 활성 주문이 있는 그리드만 복원
+                has_active = any(
+                    l.status in (GridStatus.ACTIVE, GridStatus.FILLED)
+                    for l in grid.levels
+                )
+                if not has_active:
+                    await self._db.deactivate_grid(market)
+                    continue
+
+                if self._paper_mode:
+                    # Paper 모드: 예약된 KRW를 잔고에서 차감
+                    reserved = sum(
+                        l.volume * l.price for l in grid.buy_levels
+                        if l.status in (GridStatus.ACTIVE, GridStatus.FILLED) and l.volume > 0
+                    )
+                    self._paper_available_krw -= reserved
+
+                self._active_grids[market] = grid
+                restored += 1
+
+                active_buys = sum(1 for l in grid.buy_levels if l.status == GridStatus.ACTIVE)
+                filled_buys = sum(1 for l in grid.buy_levels if l.status == GridStatus.FILLED)
+                logger.info(
+                    f"그리드 복원 | {market} | "
+                    f"매수대기: {active_buys} | 매수체결: {filled_buys}"
+                )
+            except Exception as e:
+                logger.error(f"그리드 복원 실패 ({market}): {e}")
+                await self._db.deactivate_grid(market)
+
+        if restored:
+            logger.info(f"총 {restored}개 그리드 상태 복원 완료")
 
     async def _shutdown(self) -> None:
         """봇 종료."""

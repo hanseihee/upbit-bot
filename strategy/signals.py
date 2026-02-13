@@ -389,6 +389,68 @@ class SignalEngine:
 
         return Signal(type=SignalType.HOLD, confidence=0.0, reasons=["재진입 조건 미충족"], market=market, regime=regime)
 
+    def check_higher_tf_trend(self, df_higher: pd.DataFrame) -> tuple[bool, list[str]]:
+        """상위 타임프레임 추세 확인. 하락 추세에서의 진입을 차단.
+
+        차단 조건 (하나라도 해당 시 진입 차단):
+        1. RSI < 35: 상위 TF 강한 과매도 = 하락 추세 지속 가능성
+        2. MACD 히스토그램 3연속 하락: 하락 가속 중
+        3. ADX > 30 AND 가격 < BB 중간선: 강한 하락 추세 확인
+        4. 가격이 BB 하단 아래 AND RSI < 40: 급락 구간
+
+        Returns:
+            (safe_to_enter, reasons)
+        """
+        if len(df_higher) < max(self._bb_period, 26) + 5:
+            return True, ["상위 TF 데이터 부족 (진입 허용)"]
+
+        analyzed = self._analyze(df_higher)
+        latest = analyzed.iloc[-1]
+        prev = analyzed.iloc[-2]
+        prev2 = analyzed.iloc[-3]
+
+        reasons: list[str] = []
+        blocks: list[str] = []
+
+        rsi = latest["rsi"]
+        macd_hist = latest["macd_hist"]
+        macd_prev = prev["macd_hist"]
+        macd_prev2 = prev2["macd_hist"]
+        adx = latest.get("adx", 0)
+        price = latest["close"]
+        bb_middle = latest["bb_middle"]
+        bb_lower = latest["bb_lower"]
+
+        # 1. RSI 강한 하락 확인
+        if pd.notna(rsi) and rsi < 35:
+            blocks.append(f"상위TF RSI 과매도: {rsi:.1f}")
+
+        # 2. MACD 3연속 하락 (하락 가속)
+        if all(pd.notna(v) for v in [macd_hist, macd_prev, macd_prev2]):
+            if macd_hist < macd_prev < macd_prev2:
+                blocks.append("상위TF MACD 3연속 하락")
+
+        # 3. 강한 하락 추세 (ADX > 30 + 가격 < BB 중간선)
+        if (
+            pd.notna(adx) and adx > 30
+            and pd.notna(bb_middle) and price < bb_middle
+        ):
+            blocks.append(f"상위TF 강한 하락추세 (ADX: {adx:.1f})")
+
+        # 4. 급락 구간 (BB 하단 이탈 + RSI 약세)
+        if (
+            pd.notna(bb_lower) and price < bb_lower
+            and pd.notna(rsi) and rsi < 40
+        ):
+            blocks.append(f"상위TF 급락 구간 (RSI: {rsi:.1f}, BB하단 이탈)")
+
+        if blocks:
+            return False, blocks
+
+        # 안전 확인 이유 기록
+        reasons.append(f"상위TF 안전 (RSI: {rsi:.1f}, ADX: {adx:.1f})")
+        return True, reasons
+
     def calculate_confidence(self, df: pd.DataFrame) -> float:
         """현재 시장 상태의 전반적 신뢰도 평가."""
         signal = self.generate_signal(df)

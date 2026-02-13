@@ -247,6 +247,24 @@ class TradeDB:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_all_active_grids(self) -> list[dict]:
+        """모든 활성 그리드 상태 조회."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            "SELECT * FROM grid_states WHERE active=1 ORDER BY id DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def deactivate_grid(self, market: str) -> None:
+        """특정 마켓의 그리드 상태 비활성화."""
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE grid_states SET active=0, updated_at=? WHERE market=? AND active=1",
+            (datetime.now().isoformat(), market),
+        )
+        await self._db.commit()
+
     # ── 모멘텀 상태 ─────────────────────────────────────
 
     async def save_momentum_state(self, market: str, position_data: str) -> int:
