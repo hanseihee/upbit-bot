@@ -382,9 +382,10 @@ class TradingBot:
         regime = signal_result.regime if signal_result else MarketRegime.TRANSITIONAL
         bb_lower = latest["bb_lower"]
         adx_val = latest.get("adx", 0)
-        vol = latest["volume"]
-        vol_ma = latest["volume_ma"]
-        vol_ratio = vol / vol_ma if pd.notna(vol_ma) and vol_ma > 0 else 0
+        # 이전 완성 캔들 기준 거래량 (현재 캔들은 미완성)
+        prev_vol = prev["volume"]
+        prev_vol_ma = prev["volume_ma"]
+        vol_ratio = prev_vol / prev_vol_ma if pd.notna(prev_vol_ma) and prev_vol_ma > 0 else 0
         logger.info(
             f"HOLD | {market} | "
             f"가격: {current_price:,.0f} | "

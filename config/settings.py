@@ -23,19 +23,19 @@ class TradingConfig:
     secret_key: str = field(default_factory=lambda: os.getenv("UPBIT_SECRET_KEY", ""))
 
     # ── 전략 파라미터 ───────────────────────────────────
-    grid_levels: int = 4
-    grid_spacing_atr_mult: float = 5.0
+    grid_levels: int = 5
+    grid_spacing_atr_mult: float = 2.0
     rsi_period: int = 14
-    rsi_oversold: float = 30.0
-    rsi_overbought: float = 70.0
+    rsi_oversold: float = 35.0
+    rsi_overbought: float = 68.0
     bb_period: int = 20
     bb_std: float = 2.0
     atr_period: int = 14
     volume_ma_period: int = 20
     adx_period: int = 14
-    regime_bb_width_low: float = 0.005   # BB Width < 0.5% → 횡보
-    regime_bb_width_high: float = 0.02   # BB Width > 2% → 강한 추세
-    regime_adx_threshold: float = 25.0   # ADX > 25 → 추세
+    regime_bb_width_low: float = 0.02    # BB Width < 2% → 횡보
+    regime_bb_width_high: float = 0.06   # BB Width > 6% → 강한 추세
+    regime_adx_threshold: float = 30.0   # ADX > 30 → 추세
 
     # ── 코인 선별 ───────────────────────────────────────
     max_coins: int = 1
@@ -58,7 +58,7 @@ class TradingConfig:
     grid_recycle_cooldown_candles: int = 30   # 재진입 쿨다운 (30분)
 
     # ── 실행 설정 ───────────────────────────────────────
-    paper_balance: float = 100_000     # Paper 모드 초기 잔고
+    paper_balance: float = 1_000_000   # Paper 모드 초기 잔고
     candle_unit: int = 1               # 1분봉
     check_interval_sec: int = 45       # 45초마다 체크
     min_order_krw: float = 5_000       # Upbit 최소 주문금액
@@ -72,7 +72,7 @@ class TradingConfig:
     # ── 모멘텀 전략 ──────────────────────────────────────
     momentum_enabled: bool = True
     momentum_rsi_threshold: float = 55.0       # RSI 모멘텀 기준
-    momentum_volume_mult: float = 1.5          # 거래량 배수 기준
+    momentum_volume_mult: float = 1.2          # 거래량 배수 기준
     momentum_trailing_stop_pct: float = 0.008  # 트레일링 스톱 0.8%
     momentum_atr_stop_mult: float = 2.0        # ATR 스톱 배수
     momentum_max_hold_minutes: int = 15        # 최대 보유 시간
@@ -82,7 +82,7 @@ class TradingConfig:
     momentum_rsi_exit: float = 72.0            # RSI 청산 기준
 
     # ── 신호 ────────────────────────────────────────────
-    min_signal_confidence: float = 0.6
+    min_signal_confidence: float = 0.45
 
     # ── 텔레그램 ──────────────────────────────────────────
     telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))

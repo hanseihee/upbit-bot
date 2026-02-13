@@ -20,7 +20,7 @@ class TestPositionSizing:
 
     def test_low_confidence_returns_zero(self):
         """신뢰도가 기준 미달이면 0 반환."""
-        size = self.risk.calculate_position_size(300_000, 90_000_000, 0.5, 5)
+        size = self.risk.calculate_position_size(300_000, 90_000_000, 0.3, 5)
         assert size == 0
 
     def test_below_min_order_returns_zero(self):

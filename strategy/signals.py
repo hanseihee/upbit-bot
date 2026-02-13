@@ -36,7 +36,7 @@ class Signal:
 
     @property
     def is_actionable(self) -> bool:
-        return self.type != SignalType.HOLD and self.confidence >= 0.6
+        return self.type != SignalType.HOLD and self.confidence >= 0.45
 
 
 class SignalEngine:
@@ -143,22 +143,22 @@ class SignalEngine:
             buy_score += 0.30
         elif rsi_val < self._rsi_oversold + 5:
             buy_reasons.append(f"RSI 과매도 근접: {rsi_val:.1f}")
-            buy_score += 0.10
+            buy_score += 0.15
 
         # BB 하단 이탈
         bb_lower = latest["bb_lower"]
         if price <= bb_lower:
             buy_reasons.append(f"BB 하단 이탈: {price:,.0f} <= {bb_lower:,.0f}")
             buy_score += 0.30
-        elif price <= bb_lower * 1.005:
+        elif price <= bb_lower * 1.01:
             buy_reasons.append(f"BB 하단 근접: {price:,.0f}")
             buy_score += 0.10
 
-        # 거래량 확인
-        vol = latest["volume"]
-        vol_ma = latest["volume_ma"]
-        if pd.notna(vol_ma) and vol_ma > 0 and vol > vol_ma:
-            buy_reasons.append(f"거래량 증가: {vol / vol_ma:.1f}x")
+        # 거래량 확인 (이전 완성 캔들 기준 - 현재 캔들은 미완성 거래량)
+        prev_vol = prev["volume"]
+        prev_vol_ma = prev["volume_ma"]
+        if pd.notna(prev_vol_ma) and prev_vol_ma > 0 and prev_vol > prev_vol_ma:
+            buy_reasons.append(f"거래량 증가: {prev_vol / prev_vol_ma:.1f}x")
             buy_score += 0.20
 
         # MACD 히스토그램 상승 전환 (보강)
@@ -171,7 +171,7 @@ class SignalEngine:
 
         # ── 시장 체제 필터 적용 ──
         if regime == MarketRegime.TRENDING:
-            buy_score *= 0.3  # 추세장에서 Mean Reversion 크게 감점
+            buy_score *= 0.5  # 추세장에서 Mean Reversion 감점
             buy_reasons.append(f"추세장 감점 (ADX>{self._regime_adx:.0f})")
 
         # ── 매도 신호 평가 ──
@@ -193,7 +193,7 @@ class SignalEngine:
                 sell_score += 0.20
 
         # ── 최종 판단 ──
-        if buy_score > sell_score and buy_score >= 0.5:
+        if buy_score > sell_score and buy_score >= 0.45:
             return Signal(
                 type=SignalType.BUY,
                 confidence=min(buy_score, 1.0),
@@ -285,11 +285,11 @@ class SignalEngine:
                 reasons.append(f"MACD 히스토그램 양수: {macd_hist:.2f}")
                 score += 0.10
 
-        # 4. 거래량 급증
-        vol = latest["volume"]
-        vol_ma = latest["volume_ma"]
-        if pd.notna(vol_ma) and vol_ma > 0:
-            vol_ratio = vol / vol_ma
+        # 4. 거래량 급증 (이전 완성 캔들 기준)
+        prev_vol = prev["volume"]
+        prev_vol_ma = prev["volume_ma"]
+        if pd.notna(prev_vol_ma) and prev_vol_ma > 0:
+            vol_ratio = prev_vol / prev_vol_ma
             if vol_ratio > 1.5:
                 reasons.append(f"거래량 급증: {vol_ratio:.1f}x")
                 score += 0.20
@@ -308,7 +308,7 @@ class SignalEngine:
 
         # 시장 체제 필터: 횡보장에서 Momentum 감점
         if regime == MarketRegime.RANGE:
-            score *= 0.3
+            score *= 0.5
             reasons.append(f"횡보장 감점 (ADX<{self._regime_adx:.0f})")
 
         # 과매수 페널티
@@ -316,7 +316,7 @@ class SignalEngine:
             score *= 0.5
             reasons.append(f"RSI 과매수 주의: {rsi_val:.1f}")
 
-        if score >= 0.60:
+        if score >= 0.50:
             return Signal(
                 type=SignalType.MOMENTUM_BUY,
                 confidence=min(score, 1.0),
@@ -369,13 +369,14 @@ class SignalEngine:
             reasons.append(f"BB 하단 근처: {price:,.0f}")
             score += 0.40
 
-        vol = latest["volume"]
-        vol_ma = latest["volume_ma"]
-        if pd.notna(vol_ma) and vol_ma > 0 and vol > vol_ma * 0.8:
-            reasons.append(f"거래량 적정: {vol / vol_ma:.1f}x")
+        prev = analyzed.iloc[-2]
+        prev_vol = prev["volume"]
+        prev_vol_ma = prev["volume_ma"]
+        if pd.notna(prev_vol_ma) and prev_vol_ma > 0 and prev_vol > prev_vol_ma * 0.8:
+            reasons.append(f"거래량 적정: {prev_vol / prev_vol_ma:.1f}x")
             score += 0.20
 
-        if score >= 0.6:
+        if score >= 0.50:
             return Signal(
                 type=SignalType.BUY,
                 confidence=min(score, 1.0),
