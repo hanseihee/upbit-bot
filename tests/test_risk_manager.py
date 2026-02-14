@@ -14,9 +14,9 @@ class TestPositionSizing:
 
     def test_basic_sizing(self):
         """기본 포지션 사이징 계산."""
-        # 잔고 300,000 * 신뢰도 0.8 * 코인당 35% / 5레벨 = 16,800
+        # 잔고 300,000 * 신뢰도 0.8 * 코인당 40% / 5레벨 = 19,200
         size = self.risk.calculate_position_size(300_000, 90_000_000, 0.8, 5)
-        assert size == 16_800
+        assert size == 19_200
 
     def test_low_confidence_returns_zero(self):
         """신뢰도가 기준 미달이면 0 반환."""

@@ -84,6 +84,7 @@ class TradingBot:
             atr_multiplier=config.grid_spacing_atr_mult,
             stop_loss_pct=config.stop_loss_pct,
             fee_rate=config.upbit_fee_rate,
+            sell_target_mult=config.grid_sell_target_mult,
         )
 
         # 상태

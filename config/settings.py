@@ -23,19 +23,20 @@ class TradingConfig:
     secret_key: str = field(default_factory=lambda: os.getenv("UPBIT_SECRET_KEY", ""))
 
     # ── 전략 파라미터 ───────────────────────────────────
-    grid_levels: int = 5
-    grid_spacing_atr_mult: float = 2.0
+    grid_levels: int = 3
+    grid_spacing_atr_mult: float = 4.0
+    grid_sell_target_mult: float = 1.5   # 매도 목표 = 매수가 + spacing * 1.5
     rsi_period: int = 14
-    rsi_oversold: float = 35.0
-    rsi_overbought: float = 68.0
+    rsi_oversold: float = 42.0
+    rsi_overbought: float = 70.0
     bb_period: int = 20
     bb_std: float = 2.0
     atr_period: int = 14
     volume_ma_period: int = 20
     adx_period: int = 14
-    regime_bb_width_low: float = 0.02    # BB Width < 2% → 횡보
-    regime_bb_width_high: float = 0.06   # BB Width > 6% → 강한 추세
-    regime_adx_threshold: float = 30.0   # ADX > 30 → 추세
+    regime_bb_width_low: float = 0.015   # BB Width < 1.5% → 횡보
+    regime_bb_width_high: float = 0.10   # BB Width > 10% → 강한 추세
+    regime_adx_threshold: float = 20.0   # ADX > 20 → 추세
 
     # ── 코인 선별 ───────────────────────────────────────
     max_coins: int = 1
@@ -47,14 +48,14 @@ class TradingConfig:
     max_spread_pct: float = 0.003           # 스프레드 0.3% 이하
 
     # ── 리스크 관리 ─────────────────────────────────────
-    max_per_coin_ratio: float = 0.35     # 코인당 최대 35% (보수적)
-    stop_loss_pct: float = 0.008         # 0.8% 손절 (빠른 컷)
+    max_per_coin_ratio: float = 0.40     # 코인당 최대 40%
+    stop_loss_pct: float = 0.010         # 1.0% 손절
     max_drawdown_pct: float = 0.07       # 총 -7% 드로다운 한도
     max_position_age_hours: int = 6      # 5분봉 기준 6시간
 
     # ── 그리드 리사이클 ────────────────────────────────
     grid_recycle_enabled: bool = True
-    grid_recycle_rsi_threshold: float = 40.0  # 재진입 RSI 기준 (더 보수적)
+    grid_recycle_rsi_threshold: float = 50.0  # 재진입 RSI 기준
     grid_recycle_cooldown_candles: int = 12   # 재진입 쿨다운 (5분봉×12 = 60분)
 
     # ── 실행 설정 ───────────────────────────────────────
@@ -82,7 +83,7 @@ class TradingConfig:
     momentum_rsi_exit: float = 72.0            # RSI 청산 기준
 
     # ── 신호 ────────────────────────────────────────────
-    min_signal_confidence: float = 0.45
+    min_signal_confidence: float = 0.35
 
     # ── 다중 타임프레임 ──────────────────────────────────
     higher_tf_unit: int = 15             # 상위 타임프레임 (15분봉)

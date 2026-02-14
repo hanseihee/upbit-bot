@@ -36,7 +36,7 @@ class Signal:
 
     @property
     def is_actionable(self) -> bool:
-        return self.type != SignalType.HOLD and self.confidence >= 0.45
+        return self.type != SignalType.HOLD and self.confidence >= 0.30
 
 
 class SignalEngine:
@@ -44,7 +44,7 @@ class SignalEngine:
 
     def __init__(
         self,
-        rsi_oversold: float = 35.0,
+        rsi_oversold: float = 45.0,
         rsi_overbought: float = 70.0,
         bb_period: int = 20,
         bb_std: float = 2.0,
@@ -52,9 +52,9 @@ class SignalEngine:
         atr_period: int = 14,
         volume_ma_period: int = 20,
         adx_period: int = 14,
-        regime_bb_width_low: float = 0.04,
-        regime_bb_width_high: float = 0.08,
-        regime_adx_threshold: float = 25.0,
+        regime_bb_width_low: float = 0.015,
+        regime_bb_width_high: float = 0.10,
+        regime_adx_threshold: float = 20.0,
     ) -> None:
         self._rsi_oversold = rsi_oversold
         self._rsi_overbought = rsi_overbought
@@ -122,8 +122,8 @@ class SignalEngine:
         - TRENDING에서는 Grid 진입 차단
 
         진입 조건 (가중 스코어링):
-        - RSI(14) < 35 (과매도)          [0.30]
-        - 가격 <= BB 하단밴드              [0.30]
+        - RSI(14) < 45 (과매도)          [0.30]
+        - 가격 <= BB 하단밴드 +2%         [0.20~0.30]
         - 현재 거래량 > 20일 평균          [0.20]
         - MACD 히스토그램 상승 전환 (보강)  [0.20]
         """
@@ -143,15 +143,21 @@ class SignalEngine:
             buy_score += 0.30
         elif rsi_val < self._rsi_oversold + 5:
             buy_reasons.append(f"RSI 과매도 근접: {rsi_val:.1f}")
-            buy_score += 0.15
+            buy_score += 0.20
+        elif rsi_val < self._rsi_oversold + 10:
+            buy_reasons.append(f"RSI 중립 하단: {rsi_val:.1f}")
+            buy_score += 0.10
 
         # BB 하단 이탈
         bb_lower = latest["bb_lower"]
         if price <= bb_lower:
             buy_reasons.append(f"BB 하단 이탈: {price:,.0f} <= {bb_lower:,.0f}")
             buy_score += 0.30
-        elif price <= bb_lower * 1.01:
+        elif price <= bb_lower * 1.02:
             buy_reasons.append(f"BB 하단 근접: {price:,.0f}")
+            buy_score += 0.20
+        elif price <= bb_lower * 1.03:
+            buy_reasons.append(f"BB 하단 접근: {price:,.0f}")
             buy_score += 0.10
 
         # 거래량 확인 (이전 완성 캔들 기준 - 현재 캔들은 미완성 거래량)
@@ -171,8 +177,8 @@ class SignalEngine:
 
         # ── 시장 체제 필터 적용 ──
         if regime == MarketRegime.TRENDING:
-            buy_score *= 0.5  # 추세장에서 Mean Reversion 감점
-            buy_reasons.append(f"추세장 감점 (ADX>{self._regime_adx:.0f})")
+            buy_score *= 0.75  # 추세장에서 Mean Reversion 소폭 감점
+            buy_reasons.append(f"추세장 소폭 감점 (ADX>{self._regime_adx:.0f})")
 
         # ── 매도 신호 평가 ──
         sell_reasons: list[str] = []
@@ -193,7 +199,7 @@ class SignalEngine:
                 sell_score += 0.20
 
         # ── 최종 판단 ──
-        if buy_score > sell_score and buy_score >= 0.45:
+        if buy_score > sell_score and buy_score >= 0.30:
             return Signal(
                 type=SignalType.BUY,
                 confidence=min(buy_score, 1.0),
@@ -392,11 +398,11 @@ class SignalEngine:
     def check_higher_tf_trend(self, df_higher: pd.DataFrame) -> tuple[bool, list[str]]:
         """상위 타임프레임 추세 확인. 하락 추세에서의 진입을 차단.
 
-        차단 조건 (하나라도 해당 시 진입 차단):
-        1. RSI < 35: 상위 TF 강한 과매도 = 하락 추세 지속 가능성
-        2. MACD 히스토그램 3연속 하락: 하락 가속 중
-        3. ADX > 30 AND 가격 < BB 중간선: 강한 하락 추세 확인
-        4. 가격이 BB 하단 아래 AND RSI < 40: 급락 구간
+        차단 조건 (극단적 상황만 차단):
+        1. RSI < 25: 상위 TF 극단 과매도
+        2. MACD 3연속 하락: 참고 정보만 (차단 안 함)
+        3. ADX > 40 AND 가격 < BB 하단: 극심한 하락추세만 차단
+        4. 가격이 BB 하단 아래 AND RSI < 30: 급락 구간
 
         Returns:
             (safe_to_enter, reasons)
@@ -421,26 +427,26 @@ class SignalEngine:
         bb_middle = latest["bb_middle"]
         bb_lower = latest["bb_lower"]
 
-        # 1. RSI 강한 하락 확인
-        if pd.notna(rsi) and rsi < 35:
-            blocks.append(f"상위TF RSI 과매도: {rsi:.1f}")
+        # 1. RSI 극단적 과매도만 차단
+        if pd.notna(rsi) and rsi < 25:
+            blocks.append(f"상위TF RSI 극단 과매도: {rsi:.1f}")
 
-        # 2. MACD 3연속 하락 (하락 가속)
+        # 2. MACD 3연속 하락은 정보성 로그만 (차단 제거)
         if all(pd.notna(v) for v in [macd_hist, macd_prev, macd_prev2]):
             if macd_hist < macd_prev < macd_prev2:
-                blocks.append("상위TF MACD 3연속 하락")
+                reasons.append("상위TF MACD 3연속 하락 (참고)")
 
-        # 3. 강한 하락 추세 (ADX > 30 + 가격 < BB 중간선)
+        # 3. 강한 하락 추세 (ADX > 40 + 가격 < BB 하단 - 극단만 차단)
         if (
-            pd.notna(adx) and adx > 30
-            and pd.notna(bb_middle) and price < bb_middle
+            pd.notna(adx) and adx > 40
+            and pd.notna(bb_lower) and price < bb_lower
         ):
-            blocks.append(f"상위TF 강한 하락추세 (ADX: {adx:.1f})")
+            blocks.append(f"상위TF 극심한 하락추세 (ADX: {adx:.1f})")
 
-        # 4. 급락 구간 (BB 하단 이탈 + RSI 약세)
+        # 4. 급락 구간 (BB 하단 이탈 + RSI 극단 - 기준 대폭 완화)
         if (
             pd.notna(bb_lower) and price < bb_lower
-            and pd.notna(rsi) and rsi < 40
+            and pd.notna(rsi) and rsi < 30
         ):
             blocks.append(f"상위TF 급락 구간 (RSI: {rsi:.1f}, BB하단 이탈)")
 

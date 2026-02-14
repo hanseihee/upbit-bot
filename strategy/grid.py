@@ -107,10 +107,12 @@ class AdaptiveGrid:
         atr_multiplier: float = 0.5,
         stop_loss_pct: float = 0.05,
         fee_rate: float = 0.0005,
+        sell_target_mult: float = 1.0,
     ) -> None:
         self._atr_mult = atr_multiplier
         self._stop_loss_pct = stop_loss_pct
         self._fee_rate = fee_rate
+        self._sell_target_mult = sell_target_mult
 
     def calculate_grid(
         self,
@@ -159,10 +161,11 @@ class AdaptiveGrid:
                 side=GridSide.BUY,
             ))
 
-        # 매도 그리드 (각 매수 레벨 + 1 spacing 위)
+        # 매도 그리드 (각 매수 레벨 + sell_target_mult * spacing 위)
         for i in range(levels):
+            buy_price_i = current_price - spacing * (i + 1)
             sell_price = self._round_to_tick(
-                current_price - spacing * i, current_price
+                buy_price_i + spacing * self._sell_target_mult, current_price
             )
             grid.levels.append(GridLevel(
                 level=i + 1,

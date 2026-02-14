@@ -83,6 +83,7 @@ class BacktestEngine:
             atr_multiplier=self._config.grid_spacing_atr_mult,
             stop_loss_pct=self._config.stop_loss_pct,
             fee_rate=self._config.upbit_fee_rate,
+            sell_target_mult=self._config.grid_sell_target_mult,
         )
 
     async def fetch_data(self, market: str, days: int) -> pd.DataFrame:
